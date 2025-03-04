@@ -17,6 +17,20 @@ export IMAGE_TAG
 
 IMAGE := $(IMAGE_REPO):$(IMAGE_TAG)
 
+# Extract Kubernetes client-go version used to set the version to the PSA labels, for ENVTEST and KIND
+ifeq ($(origin K8S_VERSION), undefined)
+K8S_VERSION := $(shell go list -m k8s.io/client-go | cut -d" " -f2 | sed -E 's/^v0\.([0-9]+)\.[0-9]+$$/1.\1/')
+endif
+
+# Ensure ENVTEST_VERSION follows correct "X.Y.x" format
+ENVTEST_VERSION := $(K8S_VERSION).x
+
+# Not guaranteed to have patch releases available and node image tags are full versions (i.e v1.28.0 - no v1.28, v1.29, etc.)
+# The K8S_VERSION is set by getting the version of the k8s.io/client-go dependency from the go.mod
+# and sets major version to "1" and the patch version to "0". For example, a client-go version of v0.28.5
+# will map to a K8S_VERSION of 1.28.0
+KIND_CLUSTER_IMAGE := kindest/node:v$(K8S_VERSION).0
+
 # By default setup-envtest will write to $XDG_DATA_HOME, or $HOME/.local/share if that is not defined.
 # If $HOME is not set, we need to specify a binary directory to prevent an error in setup-envtest.
 # Useful for some CI/CD environments that set neither $XDG_DATA_HOME nor $HOME.
@@ -41,7 +55,6 @@ include .bingo/Variables.mk
 
 # Dependencies
 export CERT_MGR_VERSION := v1.15.3
-ENVTEST_SERVER_VERSION := $(shell go list -m k8s.io/client-go | cut -d" " -f2 | sed 's/^v0\.\([[:digit:]]\{1,\}\)\.[[:digit:]]\{1,\}$$/1.\1.x/')
 
 # Cluster configuration
 ifeq ($(origin KIND_CLUSTER_NAME), undefined)
@@ -52,7 +65,6 @@ endif
 TESTDATA_DIR := testdata
 
 CATALOGD_NAMESPACE := olmv1-system
-KIND_CLUSTER_IMAGE := kindest/node:v1.30.0@sha256:047357ac0cfea04663786a612ba1eaba9702bef25227a794b52890dd8bcd692e
 
 ##@ General
 
@@ -100,7 +112,7 @@ bingo-upgrade: $(BINGO) #EXHELP Upgrade tools
 .PHONY: test-unit
 UNIT_TEST_DIRS := $(shell go list ./... | grep -v /test/e2e | grep -v /test/upgrade)
 test-unit: generate fmt vet $(SETUP_ENVTEST) ## Run tests.
-	eval $$($(SETUP_ENVTEST) use -p env $(ENVTEST_SERVER_VERSION) $(SETUP_ENVTEST_BIN_DIR_OVERRIDE)) && \
+	eval $$($(SETUP_ENVTEST) use -p env $(ENVTEST_VERSION) $(SETUP_ENVTEST_BIN_DIR_OVERRIDE)) && \
         go test \
           -tags '$(GO_BUILD_TAGS)' \
           -coverprofile cover.out \
@@ -128,8 +140,14 @@ tidy: ## Update dependencies
 	go mod tidy -go=$(GOLANG_VERSION)
 
 .PHONY: verify
-verify: tidy fmt vet generate ## Verify the current code generation and lint
+verify: tidy fmt vet generate update-k8s-values ## Verify the current code generation and lint
 	git diff --exit-code
+
+.PHONY: update-k8s-values # HELP Update PSA labels in config manifests with Kubernetes version
+update-k8s-values:
+	find config -type f -name '*.yaml' -exec \
+	sed -i.bak -E 's/(pod-security.kubernetes.io\/[a-zA-Z-]+-version:).*/\1 "v$(K8S_VERSION)"/g' {} +;
+	find config -type f -name '*.yaml.bak' -delete
 
 .PHONY: verify-crd-compatibility
 CRD_DIFF_ORIGINAL_REF := main
